@@ -2,7 +2,9 @@ import os
 from types import SimpleNamespace
 import warnings
 
+import numpy as np
 import pytest
+import torch
 
 from fastvideo.api import (
     GenerationRequest,
@@ -13,7 +15,7 @@ from fastvideo.api import (
     load_run_config,
 )
 from fastvideo.api.sampling_param import SamplingParam
-from fastvideo.entrypoints.video_generator import VideoGenerator
+from fastvideo.entrypoints.video_generator import VideoGenerator, _video_tensor_to_uint8_frames
 from fastvideo.fastvideo_args import WorkloadType
 
 
@@ -138,6 +140,86 @@ def test_prepare_output_path_uniqueness_suffix(tmp_path):
         f.write(b"")
     third = vg._prepare_output_path(str(out_dir), prompt=prompt)
     assert os.path.basename(third) == "Sample Name_2.mp4"
+
+
+def test_video_tensor_to_uint8_frames_converts_on_tensor_before_cpu_copy():
+    samples = torch.tensor(
+        [[[[[0.0, 0.5], [1.0, 0.25]], [[0.75, 0.1], [0.2, 0.3]]]]],
+        dtype=torch.float32,
+    ).repeat(1, 3, 1, 1, 1)
+
+    frames = _video_tensor_to_uint8_frames(samples)
+
+    assert len(frames) == 2
+    assert frames[0].dtype == np.uint8
+    assert frames[0].shape == (2, 2, 3)
+    assert frames[0][0, 0, 0] == 0
+    assert frames[0][0, 1, 0] == 127
+    assert frames[0][1, 0, 0] == 255
+
+
+def test_generate_single_video_save_only_skips_full_precision_cpu_sample_copy(tmp_path, monkeypatch):
+    generator = _new_runtime_video_generator()
+    generator.fastvideo_args = SimpleNamespace(
+        model_path="test-model",
+        workload_type=SimpleNamespace(value="t2v"),
+        output_type="video",
+        VSA_sparsity=0.8,
+        pin_cpu_memory=True,
+        pipeline_config=SimpleNamespace(flow_shift=None, embedded_cfg_scale=None),
+    )
+    output = torch.rand((1, 3, 2, 2, 2), dtype=torch.float32)
+
+    class FakeExecutor:
+        def execute_forward(self, batch, fastvideo_args):
+            return SimpleNamespace(
+                output=output,
+                logging_info=None,
+                extra={},
+                trajectory_latents=None,
+                trajectory_timesteps=None,
+                trajectory_decoded=None,
+            )
+
+    generator.executor = FakeExecutor()
+    saved = {}
+
+    def fake_mimsave(path, frames, fps, format):
+        saved["path"] = path
+        saved["frames"] = frames
+        saved["fps"] = fps
+        saved["format"] = format
+
+    monkeypatch.setattr("fastvideo.entrypoints.video_generator.imageio.mimsave", fake_mimsave)
+    original_cpu = torch.Tensor.cpu
+    cpu_shapes = []
+
+    def spy_cpu(self, *args, **kwargs):
+        cpu_shapes.append(tuple(self.shape))
+        return original_cpu(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "cpu", spy_cpu)
+    sampling_param = SamplingParam(
+        num_frames=2,
+        height=2,
+        width=2,
+        save_video=True,
+        return_frames=False,
+    )
+
+    result = generator._generate_single_video(
+        prompt="test prompt",
+        sampling_param=sampling_param,
+        output_path=str(tmp_path / "out.mp4"),
+    )
+
+    assert result["samples"] is None
+    assert result["frames"] is None
+    assert result["video_path"] == str(tmp_path / "out.mp4")
+    assert saved["format"] == "mp4"
+    assert len(saved["frames"]) == 2
+    assert saved["frames"][0].dtype == np.uint8
+    assert (1, 3, 2, 2, 2) not in cpu_shapes
 
 
 def test_prepare_output_path_empty_prompt_fallback(tmp_path):

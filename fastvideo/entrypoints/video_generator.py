@@ -112,6 +112,17 @@ def _infer_latent_batch_size(batch: ForwardBatch) -> int:
     return latent_batch_size
 
 
+def _video_tensor_to_uint8_frames(samples: torch.Tensor) -> list[np.ndarray]:
+    videos = rearrange(samples, "b c t h w -> t b c h w")
+    frames = []
+    for x in videos:
+        x = torchvision.utils.make_grid(x, nrow=6)
+        x = x.permute(1, 2, 0).squeeze(-1)
+        x = (x * 255).to(torch.uint8)
+        frames.append(x.contiguous().cpu().numpy())
+    return frames
+
+
 class VideoGenerator:
     """
     A unified class for generating videos using diffusion models.
@@ -750,12 +761,13 @@ class VideoGenerator:
         latent_batch_size = _infer_latent_batch_size(batch)
         # When ``output_type == "latent"`` the forward output has latent
         # shape (e.g. ``[B, C_latent, T_latent, H_latent, W_latent]``)
-        # rather than the pre-allocation's pixel shape. Skip the pinned
-        # ~50 MB buffer entirely; we always fall through to the
-        # ``samples = output_batch.output.cpu()`` branch below in that
-        # mode. ``skip_pixel_prealloc`` also gates the slow-path warning.
+        # rather than the pre-allocation's pixel shape. When callers do not
+        # request returned frames/samples, skip the pinned pixel buffer too:
+        # the save path can convert the GPU output to uint8 before the D2H
+        # copy, avoiding a full precision CPU transfer.
         skip_pixel_prealloc = fastvideo_args.output_type == "latent"
-        if skip_pixel_prealloc:
+        skip_cpu_sample_copy = not batch.return_frames and not skip_pixel_prealloc
+        if skip_pixel_prealloc or skip_cpu_sample_copy:
             samples = torch.empty(0, device='cpu')
         else:
             samples = torch.empty(
@@ -773,7 +785,9 @@ class VideoGenerator:
             raise RuntimeError("Forward execution returned no output tensor. "
                                "This usually means the executor/pipeline failed earlier.")
 
-        if output_batch.output.shape == samples.shape:
+        if skip_cpu_sample_copy:
+            pass
+        elif output_batch.output.shape == samples.shape:
             samples.copy_(output_batch.output)
         else:
             if not skip_pixel_prealloc:
@@ -798,19 +812,17 @@ class VideoGenerator:
         #   3. Pixel video / image — the historical happy path.
         is_latent_output = fastvideo_args.output_type == "latent"
         audio_only = bool(output_batch.extra.get("audio_only"))
+        needs_pixel_frames = (batch.return_frames or batch.save_video) and not is_latent_output and not audio_only
 
         postprocess_start = time.perf_counter()
         frames: list[np.ndarray] | None
         if is_latent_output or audio_only:
             frames = None if is_latent_output else []
-        else:
-            videos = rearrange(samples, "b c t h w -> t b c h w")
+        elif not needs_pixel_frames:
             frames = []
-            for x in videos:
-                x = torchvision.utils.make_grid(x, nrow=6)
-                x = x.permute(1, 2, 0).squeeze(-1)
-                x = (x * 255).to(torch.uint8)
-                frames.append(x.contiguous().cpu().numpy())
+        else:
+            frame_source = output_batch.output if skip_cpu_sample_copy else samples
+            frames = _video_tensor_to_uint8_frames(frame_source)
         postprocess_time = time.perf_counter() - postprocess_start
         logger.info("PostDecodeFrameProcessStage completed in %.3f s", postprocess_time)
         if logging_info is not None:
