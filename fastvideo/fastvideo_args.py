@@ -435,7 +435,7 @@ class FastVideoArgs:
             "--output-type",
             type=str,
             default=FastVideoArgs.output_type,
-            choices=["pil"],
+            choices=["pil", "latent"],
             help="Output type for the generated video",
         )
 
