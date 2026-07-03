@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-inference-steps", type=int, default=3)
     parser.add_argument("--output-dir", type=Path, default=Path("outputs_video/ltx2_basic"))
     parser.add_argument("--save-video", action="store_true", help="Save the measured run as mp4.")
+    parser.add_argument("--return-frames", action="store_true", help="Return decoded frames from each run.")
     parser.add_argument("--profile-name", default=None, help="NVTX label suffix for the measured run.")
     return parser.parse_args()
 
@@ -38,6 +39,7 @@ def run_generation(generator: VideoGenerator, args: argparse.Namespace, output_p
         prompt=PROMPT,
         output_path=output_path,
         save_video=save_video,
+        return_frames=args.return_frames,
         num_frames=args.num_frames,
         height=args.height,
         width=args.width,
@@ -70,7 +72,9 @@ def main() -> None:
 
     warmup_output = str(args.output_dir / "warmup.mp4")
     final_output = str(args.output_dir / "ltx2_trace_test.mp4")
-    measured_suffix = args.profile_name or ("save_video" if args.save_video else "no_save_video")
+    measured_suffix = args.profile_name or (
+        f"save_{args.save_video}_return_{args.return_frames}"
+    )
     measured_label = f"ltx2_profiled_generate:{measured_suffix}"
 
     print("Loading LTX2 generator...")
@@ -97,7 +101,10 @@ def main() -> None:
         )
     print("Warmup complete.")
 
-    print(f"Starting measured inference: save_video={args.save_video}")
+    print(
+        "Starting measured inference: "
+        f"save_video={args.save_video}, return_frames={args.return_frames}"
+    )
     timed_generation(
         generator,
         args,
