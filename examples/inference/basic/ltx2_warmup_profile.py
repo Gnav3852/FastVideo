@@ -46,7 +46,6 @@ def run_generation(generator: VideoGenerator, args: argparse.Namespace, output_p
         output_path=output_path,
         save_video=save_video,
         return_frames=args.return_frames,
-        output_type=args.output_type,
         num_frames=args.num_frames,
         height=args.height,
         width=args.width,
@@ -91,6 +90,7 @@ def main() -> None:
         generator = VideoGenerator.from_pretrained(
             "Davids048/LTX2-Base-Diffusers",
             num_gpus=1,
+            output_type=args.output_type,
         )
         synchronize()
     finally:
