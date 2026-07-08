@@ -258,16 +258,26 @@ class DecodingStage(PipelineStage):
                 - output: Decoded frames (batch, channels, frames, height, width) as CPU float32
                 - trajectory_decoded (if requested): List of decoded frames per timestep
         """
+        skip_pixel_decode = (
+            fastvideo_args.output_type != "latent"
+            and not batch.save_video
+            and not batch.return_frames
+            and not batch.return_trajectory_decoded
+        )
+
         # load vae if not already loaded (used for memory constrained devices)
         pipeline = self.pipeline() if self.pipeline else None
-        if not fastvideo_args.model_loaded["vae"]:
+        if not skip_pixel_decode and not fastvideo_args.model_loaded["vae"]:
             loader = VAELoader()
             self.vae = loader.load(fastvideo_args.model_paths["vae"], fastvideo_args)
             if pipeline:
                 pipeline.add_module("vae", self.vae)
             fastvideo_args.model_loaded["vae"] = True
 
-        if fastvideo_args.output_type == "latent":
+        if skip_pixel_decode:
+            frames = batch.latents
+            batch.extra["pixel_decode_skipped"] = True
+        elif fastvideo_args.output_type == "latent":
             frames = batch.latents
             if frames.ndim == 5 and frames.shape[2] == 1 and self._is_flux2_packed(frames):
                 frames = self._flux2_bn_denorm_and_unpatchify(frames.squeeze(2))
