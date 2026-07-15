@@ -8,6 +8,7 @@ This module defines the base class for pipelines that are composed of multiple s
 import argparse
 import os
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from typing import Any, cast
 
 import torch
@@ -505,9 +506,16 @@ class ComposedPipelineBase(ABC):
 
         # Execute each stage
         logger.info("Running pipeline stages: %s", self._stage_name_mapping.keys())
+        enable_stage_nvtx = os.environ.get("FASTVIDEO_NVTX_STAGE_RANGES", "").lower() in {
+            "1", "true", "yes", "on"
+        }
         # logger.info("Batch: %s", batch)
         for stage in self.stages:
-            batch = stage(batch, fastvideo_args)
+            stage_name = getattr(stage, "_pipeline_stage_name", stage.__class__.__name__)
+            range_ctx = (torch.cuda.nvtx.range(f"fastvideo_stage:{stage_name}")
+                         if enable_stage_nvtx and torch.cuda.is_available() else nullcontext())
+            with range_ctx:
+                batch = stage(batch, fastvideo_args)
 
         # Return the output
         return batch
